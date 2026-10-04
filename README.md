@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-默认端口：`6303`。健康检查：`GET /health`。
+默认端口：`6303`。健康检查：`GET /health`。测试：`npm test`（使用 `fastify.inject`，无需监听端口）。
 
 ## 业务闭环
 
@@ -29,3 +29,29 @@ npm run dev
 - 轨迹 release、执行遥测和安全审计
 
 扩展接口：`/api/calibrations`、`/api/frames`、`/api/dynamic-obstacles`、`/api/paths/:id/release`、`/api/executions/:id/telemetry`。
+
+## 执行安全门禁（release ↔ execution）
+
+`POST /api/executions` 不再只看最后一次碰撞校验。执行前必须同时满足：
+
+1. 轨迹最近一次碰撞校验有效（`collision-validation`）；
+2. 当前机器人/工具的 TCP 标定存在、状态 valid 且未过期（`tcp-calibration`）；
+3. 所属单元内没有活动动态障碍（`dynamic-obstacle-present`）；
+4. 存在针对**当前状态**的、仍存活的安全 release（`released`）。
+
+`POST /api/paths/:id/release` 在四项都满足时才放行，并记录现场快照
+（`validationId`、`calibrationId`、活动障碍列表、单元障碍上报纪元）。语义：
+
+- 条件不满足：返回 `409 release-blocked`，失败原因写入审计，不产生有效放行；
+- 同一现场状态下重复申请：返回 `409 release-duplicate`，不重复发放；
+- release 后任何条件失效（新增障碍、标定过期、重新碰撞校验等），执行入口
+  返回 `409 release-invalidated` / `409 release-stale` 并把旧 release 标记为
+  `invalidated`；障碍清除或重新标定**不会**自动恢复旧 release，必须重新申请；
+- 即使障碍被上报后又清除（现场恢复为空），障碍上报纪元的变化也会使旧 release
+  失效，历史 release 永远不能永久放行；
+- 一次 release 只授权一次执行，执行创建后该 release 变为 `consumed`；
+- 门禁只读取当前状态，不会用重新调用碰撞校验代替放行流程。
+
+查询：`GET /api/paths/:id/release`（最新结果与历史）、`GET /api/safety/releases`、
+`GET /api/executions`、`GET /api/executions/:id`；所有放行、拒绝、阻断与执行
+决定均写入 `GET /api/audit`。
